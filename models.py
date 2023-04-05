@@ -753,4 +753,57 @@ def get_cifar_models(config, model_name="", extra_path=None):
 
   raise ValueError('invalid model-name : {:}'.format(model_name))
 
+class InstanceMetaNet(nn.Module):
+    "A cnn-network for instance specific weighting prediction"
+    def __init__(self, out_features=16, in_features=3, num_layers=4, input_size=32):
+        super(InstanceMetaNet, self).__init__()
+        self.num_layers = num_layers
+        self.layers = []
+        self.layers.append(nn.Conv2d(in_features,out_features,kernel_size=3,stride=1, padding=1))
+        for i in range(self.num_layers):
+            self.layers.append(nn.Conv2d(out_features, out_features, kernel_size=3,stride=1, padding=1))
+            self.layers.append(nn.ReLU(nn.BatchNorm2d(out_features)))
+            if input_size>32:
+                self.layers.append(nn.MaxPool2d(kernel_size=2,stride=2))
+                input_size = input_size//2
 
+        
+        self.layers = nn.Sequential(*self.layers)
+
+        #output layer for predicting weight
+        self.final_layer = nn.Linear(input_size*input_size*out_features,1)
+    
+    def forward(self, input):
+        out = self.layers(input)
+        out = out.view(out.size(0),-1)
+        # print(out.shape)
+        return torch.sigmoid(self.final_layer(out))
+    
+class Modified_MetaLearner(nn.Module):
+    def __init__(self, out_features=16, in_features=3, num_layers=4, input_size=32):
+        super(Modified_MetaLearner, self).__init__()
+        self.num_layers = num_layers
+        self.out_features = out_features
+        self.layers = []
+        self.layers.append(nn.Conv1d(in_features,out_features,kernel_size=3,stride=1, padding=1))
+        for i in range(self.num_layers):
+            self.layers.append(nn.Conv1d(out_features, out_features, kernel_size=3,stride=1, padding=1))
+            self.layers.append(nn.ReLU(nn.BatchNorm1d(out_features)))
+            if input_size>32:
+                self.layers.append(nn.MaxPool1d(kernel_size=2,stride=2))
+                input_size = input_size//2
+
+        
+        self.layers = nn.Sequential(*self.layers)
+
+        #output layer for predicting weight
+        self.final_layer = nn.Linear(input_size*out_features,2)
+    
+    def forward(self, input):
+        
+        out = self.layers(input)
+        out = out.view(out.size(0),-1)
+        # print(out.shape)
+        return torch.sigmoid(self.final_layer(out))
+    
+    

@@ -382,3 +382,11 @@ def remove_hook_function(module):
     for ckey in keys:
         if hasattr(module, ckey):
             delattr(module, ckey)
+
+def mcd_loss(net, input, n_evals=5):
+
+    mc_samples = [net(input)[1] for _ in range(n_evals)]
+    mc_samples = torch.stack(mc_samples) #(n_evals, B, classes)
+    std_pred = torch.std(mc_samples, dim=0) #(B, classes)
+    std_pred = torch.sum(std_pred)/(input.shape[0]*mc_samples.shape[-1])
+    return std_pred

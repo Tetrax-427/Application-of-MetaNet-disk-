@@ -27,7 +27,8 @@ from log_utils import AverageMeter, ProgressMeter, time_string, convert_secs2tim
 from starts import prepare_logger
 from get_dataset_with_transform import get_datasets
 from meta import *
-
+from models import *
+from utils import *
 from DiSK import obtain_accuracy, get_mlr, save_checkpoint, evaluate_model
 
 def m__get_prefix( args ):
@@ -97,6 +98,7 @@ def main(args):
         meta_net=MLP(hidden_size=args.meta_net_hidden_size,num_layers=args.meta_net_num_layers).to(device=args.device)
     else:
         meta_net = InstanceMetaNet(input_size=args.input_size).cuda()
+        
     
     
     meta_optimizer = torch.optim.Adam(meta_net.parameters(), lr=args.meta_lr, weight_decay=args.meta_weight_decay)
@@ -113,7 +115,7 @@ def main(args):
         num_workers=args.workers,
         pin_memory=True,
     )
-    '''
+    
     meta_loader = torch.utils.data.DataLoader(
         train_data,
         batch_size=args.batch_size,
@@ -121,7 +123,7 @@ def main(args):
         num_workers=args.workers,
         pin_memory=True,
     )
-    '''
+    
     valid_loader = torch.utils.data.DataLoader(
         valid_data,
         batch_size=args.eval_batch_size,
@@ -142,6 +144,7 @@ def main(args):
     model_config = Arguments(**md_dict)
 
     base_model = get_model_from_name( model_config, args.model_name )
+    print("Student :",args.model_name)
     model_name = args.model_name
 
     base_model = base_model.cuda()
@@ -166,39 +169,53 @@ def main(args):
     logger.log("valid_data : {:}".format(valid_data))
 
     best_acc = 0.0
-    #######################################################################################
-    
-    ###########################################################################################
     
     for epoch in range(args.epochs):
-
+        mode='train'
         if epoch >= 80 and epoch % 60 == 0:
             lr = lr / 10
         for group in optimizer.param_groups:
             group['lr'] = lr
 
         print('Training...')
+
+        losses = AverageMeter('Loss', ':.4e')
+        top1 = AverageMeter('Acc@1', ':6.2f')
+        top5 = AverageMeter('Acc@5', ':6.2f')
+
+        base_model.train()
+        progress = ProgressMeter(
+                logger,
+                len(train_loader),
+                [losses, top1, top5],
+                prefix="[{}] E: [{}]".format(mode.upper(), epoch))
+
+    ###########################################################################
         for iteration, (inputs, labels) in enumerate(train_loader):
-            base_model.train()
-            #inputs, labels = inputs.to(args.device), labels.to(args.device)
+            #print ( " ******************iteration  ",  iteration)
+            i=iteration
+            inputs = inputs.cuda()
+            targets = labels.cuda(non_blocking=True)
 
             if (iteration + 1) % args.meta_interval == 0:
-            	pseudo_net = get_model_from_name( model_config, args.model_name )
-    		model_name = args.model_name
+                #print("********  IN PSEUDO NET .......")
 
-    		pseudo_net = base_model.cuda()
-    		network_ = pseudo_net
-    		
+                pseudo_net =get_model_from_name( model_config, args.model_name )
+                pseudo_model_name = args.model_name
+
+                #print("********  IN PSEUDO NET 2222.......")
+                pseudo_net =pseudo_net.cuda()
                 pseudo_net.load_state_dict(base_model.state_dict())
-                
                 pseudo_net.train()
-                
-                pseudo_outputs = pseudo_net(inputs)
-                pseudo_loss_vector = F.cross_entropy(pseudo_outputs, labels.long(), reduction='none')
+
+                _,pseudo_outputs ,_= pseudo_net(inputs)
+                pseudo_loss_vector = criterion(pseudo_outputs, targets)
                 pseudo_loss_vector_reshape = torch.reshape(pseudo_loss_vector, (-1, 1))
                 
-                
-                pseudo_weight  = meta_net(inputs)
+                if not args.inst_based:
+                    pseudo_weight = meta_net(pseudo_loss_vector_reshape.data)
+                else:
+                    pseudo_weight  = meta_net(inputs)
                 
                 pseudo_loss = torch.mean(pseudo_weight * pseudo_loss_vector_reshape)
 
@@ -213,11 +230,11 @@ def main(args):
                 try:
                     meta_inputs, meta_labels = next(meta_dataloader_iter)
                 except StopIteration:
-                    meta_dataloader_iter = iter(valid_loader)
+                    meta_dataloader_iter = iter(meta_loader)
                     meta_inputs, meta_labels = next(meta_dataloader_iter)
                 
                 meta_inputs, meta_labels = meta_inputs.cuda(), meta_labels.cuda()
-                meta_outputs = pseudo_net(meta_inputs)
+                _,meta_outputs,_ = pseudo_net(meta_inputs)
 
                 if args.unsup_adapt:
                     try:
@@ -233,27 +250,36 @@ def main(args):
                 else:
                     meta_loss = criterion(meta_outputs, meta_labels.long()) + args.mcd_weight*mcd_loss(pseudo_net, meta_inputs)
 
+                #print("*********** meta optimized .........")
                 meta_optimizer.zero_grad()
                 meta_loss.backward()
                 meta_optimizer.step()
 
-            outputs = base_model(inputs)
-            loss_vector = functional.cross_entropy(outputs, labels.long(), reduction='none')
-            loss_vector_reshape = torch.reshape(loss_vector, (-1, 1))
-
-            with torch.no_grad():
-                if not args.inst_based:
-                    weight = meta_net(loss_vector_reshape)
-                else:
-                    weight = meta_net(inputs)
-
-            loss = torch.mean(weight * loss_vector_reshape)
-            
+            #print("*********** base_model optimized .........")
             optimizer.zero_grad()
+
+            
+            _, logits, _ = network(inputs)
+
+            loss = criterion(logits, targets)
+            prec1, prec5 = obtain_accuracy(logits.data, targets.data, topk=(1, 5))
+
             loss.backward()
             optimizer.step()
+
+            losses.update(loss.item(), inputs.size(0))
+            top1.update(prec1.item(), inputs.size(0))
+            top5.update(prec5.item(), inputs.size(0))
+            
+            scheduler.step(epoch)
+            
+            if (i % args.print_freq == 0) or (i == len(train_loader)-1):
+                progress.display(i)
+            
+            
+
     ###########################################################################################
-    val_loss, val_acc1, val_acc5 = cifar_100_train_eval_loop( args, logger, epoch, optimizer, scheduler, network, valid_loader, criterion, args.eval_batch_size, mode='eval' )
+        val_loss, val_acc1, val_acc5 = cifar_100_train_eval_loop( args, logger, epoch, optimizer, scheduler, network, valid_loader, criterion, args.eval_batch_size, mode='eval' )
         is_best = False 
         if val_acc1 > best_acc:
             best_acc = val_acc1
@@ -270,17 +296,17 @@ def main(args):
         logger.log('\t\t LR=' + str(get_mlr(scheduler)) + ' -- best acc so far ' + str( best_acc )  )
 
 
-    valid_loss, valid_acc1, valid_acc5 = evaluate_model( network, valid_loader, criterion, args.eval_batch_size )
-    logger.log(
-        "***{:s}*** [Post-train] [Student] EVALUATION loss = {:.6f}, accuracy@1 = {:.2f}, accuracy@5 = {:.2f}, error@1 = {:.2f}, error@5 = {:.2f}".format(
-            time_string(),
-            valid_loss,
-            valid_acc1,
-            valid_acc5,
-            100 - valid_acc1,
-            100 - valid_acc5,
+        valid_loss, valid_acc1, valid_acc5 = evaluate_model( network, valid_loader, criterion, args.eval_batch_size )
+        logger.log(
+            "***{:s}*** [Post-train] [Student] EVALUATION loss = {:.6f}, accuracy@1 = {:.2f}, accuracy@5 = {:.2f}, error@1 = {:.2f}, error@5 = {:.2f}".format(
+                time_string(),
+                valid_loss,
+                valid_acc1,
+                valid_acc5,
+                100 - valid_acc1,
+                100 - valid_acc5,
+            )
         )
-    )
     ###########################################################################################
 if __name__ == "__main__":
 
@@ -360,12 +386,15 @@ if __name__ == "__main__":
     
     #####################################################################
     
-    parser.add_argument('--lr', type=float, default=.1)
+    #parser.add_argument('--lr', type=float, default=.1)
     parser.add_argument('--inst_based', type=bool, default=True)
     parser.add_argument('--meta_interval', type=int, default=1)
     parser.add_argument('--mcd_weight', type=float, default=0.01)
     parser.add_argument('--meta_weight_decay', type=float, default=0.)
-    
+    parser.add_argument('--input_size', type=int, default=32)
+    parser.add_argument('--meta_lr', type=float, default=1e-5)
+    parser.add_argument('--unsup_adapt', type=bool, default=False)
+
     #####################################################################
     
     args = parser.parse_args()

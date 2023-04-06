@@ -709,7 +709,7 @@ def get_instant_weight_model( num_s_ft, num_t_ft, num_s_conv_ft=10, num_t_conv_f
 
 
 def get_cifar_models(config, model_name="", extra_path=None):
-  print(model_name)
+  #print(model_name)
   if model_name == 'efficientnet':
       return EfficientNet( config.class_num )  
 

@@ -780,7 +780,7 @@ class InstanceMetaNet(nn.Module):
         return torch.sigmoid(self.final_layer(out))
     
 class Modified_MetaLearner(nn.Module):
-    def __init__(self, out_features=16, in_features=3, num_layers=4, input_size=32):
+    def __init__(self, out_features=4, in_features=2, num_layers=4, input_size=100):
         super(Modified_MetaLearner, self).__init__()
         self.num_layers = num_layers
         self.out_features = out_features
@@ -803,7 +803,9 @@ class Modified_MetaLearner(nn.Module):
         
         out = self.layers(input)
         out = out.view(out.size(0),-1)
+        out = self.final_layer(out)
+        
         # print(out.shape)
-        return torch.sigmoid(self.final_layer(out))
+        return torch.sigmoid(out)
     
     

@@ -972,6 +972,8 @@ def evaluate_model( network, xloader, criterion, batch_size ):
         features, logits, _ = network(inputs)
 
         loss = criterion(logits, targets)
+        
+        # if len(loss) > 1: loss = torch.mean(loss)
         prec1, prec5 = obtain_accuracy(logits.data, targets.data, topk=(1, 5))
 
         losses.update(loss.item(), inputs.size(0))

@@ -1,7 +1,7 @@
 GPU='0'
 
 dataset='cifar100'
-data_path='/home/anilkag/code/data/cifar/'
+data_path='/home/prathamesh/code/data/cifar/'
 save_dir='./new_models'
 
 batch_size=200

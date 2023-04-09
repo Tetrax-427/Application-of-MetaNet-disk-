@@ -8,6 +8,7 @@ import pandas as pd
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 from torch import nn
 from torch import Tensor
 from torch.distributions import Categorical
@@ -97,7 +98,8 @@ def main(args):
     if not args.inst_based:
         meta_net=MLP(hidden_size=args.meta_net_hidden_size,num_layers=args.meta_net_num_layers).to(device=args.device)
     else:
-        meta_net = InstanceMetaNet(input_size=args.input_size).cuda()
+        meta_net = Modified_MetaLearner().cuda()
+    
         
     
     
@@ -149,10 +151,25 @@ def main(args):
 
     base_model = base_model.cuda()
     network = base_model
-
+    
+    
+    base_model_dict = torch.load('/home/prathamesh/PrathameshRnD/new_models/disk-CE-cifar100-ResNet10_s-model_best.pth.tar')
+    network.load_state_dict(base_model_dict['base_state_dict'])
+    epoch_ = base_model_dict['epoch']
     optimizer = torch.optim.SGD(base_model.parameters(), args.lr, momentum=args.momentum, weight_decay=args.wd)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs)
+    optimizer.load_state_dict(base_model_dict['optimizer'])
+    scheduler.load_state_dict(base_model_dict['scheduler'])
+    meta_net.load_state_dict(base_model_dict['meta_state_dict'])
 
+    Teacher_model = get_model_from_name( model_config, 'ResNet10_l' )
+    model_name_t = 'ResNet10_l'
+
+    Teacher_model = Teacher_model.cuda()
+    network_t = Teacher_model
+    Teacher_model=    torch.load("/home/prathamesh/PrathameshRnD/ResNet10_l.pth.tar")
+
+    print("Teacher loaded....")
 
     flop, param = get_model_infos(base_model, xshape)
     args.base_flops = flop 
@@ -169,8 +186,19 @@ def main(args):
     logger.log("valid_data : {:}".format(valid_data))
 
     best_acc = 0.0
-    
-    for epoch in range(args.epochs):
+    best_acc = base_model_dict['best_acc'] 
+    pretrain_optimizer = torch.optim.SGD(meta_net.parameters(), lr=args.meta_lr, weight_decay=args.meta_weight_decay)
+     
+     
+    pre_trained_output = torch.zeros((200,2 )).cuda()
+    pre_trained_output[: , 0:1] =1 
+    # for epoch in range(100):
+     
+            
+    print("PreTraining is done..")
+        
+        
+    for epoch in range(epoch_,args.epochs):
         mode='train'
         if epoch >= 80 and epoch % 60 == 0:
             lr = lr / 10
@@ -179,6 +207,8 @@ def main(args):
 
         print('Training...')
 
+        alphas = []
+        betas = []
         losses = AverageMeter('Loss', ':.4e')
         top1 = AverageMeter('Acc@1', ':6.2f')
         top5 = AverageMeter('Acc@5', ':6.2f')
@@ -209,16 +239,59 @@ def main(args):
                 pseudo_net.train()
 
                 _,pseudo_outputs ,_= pseudo_net(inputs)
+                _,teacher_outputs,_ = network_t(inputs)
+
+                
+
+                stack_inputs = torch.stack((pseudo_outputs , teacher_outputs) , axis = 1)       
                 pseudo_loss_vector = criterion(pseudo_outputs, targets)
                 pseudo_loss_vector_reshape = torch.reshape(pseudo_loss_vector, (-1, 1))
                 
                 if not args.inst_based:
                     pseudo_weight = meta_net(pseudo_loss_vector_reshape.data)
                 else:
-                    pseudo_weight  = meta_net(inputs)
+                    pseudo_hyperparams = meta_net(stack_inputs)
+                    alpha = pseudo_hyperparams[:,0]
+                    beta = pseudo_hyperparams[:,1]
+                    
+                    # beta = torch.zeros(beta.shape).cuda()
+                    alphas.append(alpha)
+                    betas.append(beta)
+                  
+                # print(alpha , beta)
+                Temp = 4  
+                    
                 
-                pseudo_loss = torch.mean(pseudo_weight * pseudo_loss_vector_reshape)
-
+                
+                loss_KD_vector =nn.KLDivLoss(reduction='none')(
+                            F.log_softmax(pseudo_outputs / Temp, dim=1),beta[:,None]* F.softmax(pseudo_outputs / Temp, dim=1) + (1- beta[:,None])* F.softmax(teacher_outputs / Temp, dim=1))
+                
+                
+                
+                loss_CE = torch.mean(alpha * pseudo_loss_vector_reshape )
+                loss_KD= (Temp**2)*torch.mean( loss_KD_vector)
+                # print(loss_KD)
+                # print(loss_CE)
+ 
+                
+                '''
+                if not args.inst_based:
+                    alpha , beta  = meta_net(loss_CE_vector_reshape)
+                else:
+                    
+                loss_KD_vector = functional.kl_div(logs , beta*logs + (1- beta)*teacher_logs, reduction='none')
+                loss_KD_vector_reshape = torch.reshape(loss_KD_vector, (-1, 1))
+                
+                
+                loss_CE = torch.mean(alpha * loss_CE_vector_reshape)
+                loss_KD= torch.mean( loss_KD_vector_reshape)
+                
+                loss = loss_CE+ loss_KD
+                    
+                '''
+                
+                pseudo_loss = loss_CE+ loss_KD
+                # print(pseudo_loss)
                 pseudo_grads = torch.autograd.grad(pseudo_loss, pseudo_net.parameters(), create_graph=True)
 
                 pseudo_optimizer = MetaSGD(pseudo_net, pseudo_net.parameters(), lr=lr)
@@ -255,6 +328,7 @@ def main(args):
                 meta_loss.backward()
                 meta_optimizer.step()
 
+
             #print("*********** base_model optimized .........")
             optimizer.zero_grad()
 
@@ -284,10 +358,14 @@ def main(args):
         if val_acc1 > best_acc:
             best_acc = val_acc1
             is_best = True
+            
+        # print(alphas)
+        # print(betas)
         save_checkpoint({
                 'epoch': epoch + 1,
                 'base_state_dict': base_model.state_dict(),
                 'best_acc': best_acc,
+                'meta_state_dict': meta_net.state_dict(),
                 'scheduler' : scheduler.state_dict(),
                 'optimizer' : optimizer.state_dict(),
             }, is_best, prefix=get_model_prefix( args ))
